@@ -169,7 +169,23 @@ def device_status():
         result_list_cmd = subprocess.run(cmd_list_local, capture_output=True, text=True, check=False)
         if result_list_cmd.returncode == 0:
             parsed_cmd_devices = parse_usbip_list_l_output(result_list_cmd.stdout)
-            exported_devices_list_from_cmd = parsed_cmd_devices
+
+            
+            filtered_devices = []
+            exclusion_keyword = "Microchip Technology" # 除外したいキーワード
+            
+            for dev in parsed_cmd_devices:
+                # description を小文字に変換してキーワードが含まれるかチェック (大文字小文字を区別しないため)
+                if exclusion_keyword.lower() in dev.get("description", "").lower():
+                    print(f"  Excluding device (matches '{exclusion_keyword}'): {dev.get('bus_id')} - {dev.get('description')}")
+                    continue # このデバイスはスキップして次のデバイスへ
+                
+                # 除外されなかったデバイスをリストに追加
+                filtered_devices.append(dev)
+            
+            exported_devices_list_from_cmd = filtered_devices
+
+            # exported_devices_list_from_cmd = parsed_cmd_devices
         else:
             print(f"Error executing '{' '.join(cmd_list_local)}': {result_list_cmd.stderr or result_list_cmd.stdout}")
     except Exception as e:
