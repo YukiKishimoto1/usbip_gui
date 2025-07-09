@@ -312,6 +312,22 @@ def force_detach_all_server_devices():
 # --- アプリケーション起動時の処理 ---
 if __name__ == '__main__':
     import datetime # notify_attach で使うのでここでインポート
+    import os       # ファイル削除のためにインポート
+
+    # --- 起動時にアタッチ情報ログをクリアする処理 ---
+    attach_log_path = ATTACHED_DEVICES_LOG_FILE # グローバルで定義したファイル名
+    if os.path.exists(attach_log_path):
+        try:
+            print(f"Clearing previous attachment log: {attach_log_path}")
+            os.remove(attach_log_path)
+            print("Attachment log cleared successfully.")
+        except OSError as e:
+            print(f"Error clearing attachment log file: {e}")
+            # ファイルがロックされているなどの理由で削除に失敗した場合でも、
+            # アプリの起動は続行する。ただし、ログにはエラーを残す。
+    else:
+        print("No previous attachment log found. Starting fresh.")
+    
     load_client_user_info()
     load_attached_devices_log()
     if os.geteuid() != 0: # rootチェック
