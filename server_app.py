@@ -214,7 +214,8 @@ def device_status():
     response_data = {
         "exported_devices_list": final_device_list, # これがメインのリスト
         # "attached_devices_log_for_debug": attached_devices_log # デバッグ用に生のログを返すこともできる
-        "current_attachments_managed_by_app": current_attachments_for_client_api # アプリ管理のアタッチ情報
+        "current_attachments_managed_by_app": current_attachments_for_client_api, # アプリ管理のアタッチ情報
+        "app_managed_attachments": attached_devices_log   # アプリが管理するアタッチ情報
     }
     print(f"[device_status] Sending response: {json.dumps(response_data, indent=2)}")
     return jsonify(response_data)

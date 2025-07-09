@@ -259,66 +259,33 @@ def unregister_from_server(notify_server=True): # サーバー通知を制御す
     except requests.exceptions.RequestException as e:
         update_status_bar(f"Error unregistering from server: {e}")
         return False
-
-def fetch_and_display_devices_thread():
-    def task():
-        print(f"--- fetch_and_display_devices_thread (My IP: {my_local_ip}, User: {username}) ---")
-        try:
-            response = requests.get(f"{SERVER_URL}/device_status", timeout=10)
-            response.raise_for_status()
-            server_data = response.json()
-            print(f"Server /device_status response: {json.dumps(server_data, indent=2)}")
-
-            devices_tree.delete(*devices_tree.get_children())
+# `usbip list -r` の出力をパースする新しいヘルパー関数
+def parse_remote_list_output(output_str):
+    """ `usbip list -r` の出力をパースして、バインドされているバスIDのセットを返す """
+    bound_bus_ids = set()
+    lines = output_str.strip().split('\n')
+    # 出力形式例:
+    # Exportable USB devices
+    # ======================
+    #  - 192.168.2.123
+    #       1-1.5: Shanghai Jujo Electronics Co., Ltd : unknown product (6a75:9801)
+    
+    parsing_devices = False
+    for line in lines:
+        stripped_line = line.strip()
+        if stripped_line.startswith("Exportable USB devices"):
+            parsing_devices = True
+            continue
+        if not parsing_devices or not stripped_line:
+            continue
+        
+        # busid: description 形式の行を探す
+        match = re.match(r'([\w\.-]+)\s*:', stripped_line)
+        if match:
+            bus_id = match.group(1)
+            bound_bus_ids.add(bus_id)
             
-            # メインは exported_devices_list を使う。statusはサーバーが判断済み。
-            exported_devices = server_data.get("exported_devices_list", [])
-            
-            # current_attachments_managed_by_app も参考にできる (デバッグや補助情報として)
-            # app_managed_attachments = server_data.get("current_attachments_managed_by_app", [])
-
-            for dev in exported_devices:
-                bus_id = dev.get("bus_id", "N/A")
-                description = dev.get("description", "N/A")
-                vid = dev.get("vid", "")
-                pid = dev.get("pid", "")
-                display_desc = f"{description} (VID:{vid} PID:{pid})"
-                status_text = dev.get("status", "Unknown") # サーバーが判断したステータス
-
-                is_used_by_me = False
-                # ステータス文字列から自分が使っているか判定 (より堅牢なのはサーバーからの専用フラグ)
-                if status_text.startswith("In use by:"):
-                    # user_info_if_attached フィールドがあるか確認
-                    user_info = dev.get("user_info_if_attached") # サーバーが付加した使用者の情報文字列
-                    if user_info:
-                        if username in user_info and my_local_ip in user_info:
-                             is_used_by_me = True
-                             status_text = f"Attached by: You ({username})" # 表示を明確に
-                    # もし user_info_if_attached がなければ、status_text そのもので判定試行
-                    elif username in status_text and my_local_ip in status_text : # 簡易判定
-                        is_used_by_me = True
-                        status_text = f"Attached by: You ({username})"
-
-                tag = "used_by_me" if is_used_by_me else "other"
-                devices_tree.insert("", "end", values=(bus_id, display_desc, status_text), tags=(tag,))
-            
-            devices_tree.tag_configure("used_by_me", background="lightgreen")
-
-            if not exported_devices:
-                update_status_bar("No devices found on server or server data issue.")
-            else:
-                update_status_bar("Device list refreshed.")
-        # ... (エラーハンドリングは同じ) ...
-        except requests.exceptions.RequestException as e:
-            messagebox.showerror("Server Error", f"Failed to fetch device list from server: {e}")
-            update_status_bar(f"Error fetching server list: {e}")
-        except Exception as e:
-            messagebox.showerror("Error", f"An unexpected error occurred: {e}")
-            update_status_bar(f"Unexpected error: {e}")
-            import traceback; traceback.print_exc()
-            
-    threading.Thread(target=task, daemon=True).start()
-
+    return bound_bus_ids
 
 def register_user_with_server(): # 関数名を変更 (旧register_with_server)
     if my_local_ip == "Unknown":
@@ -347,62 +314,116 @@ def set_username(): # 変更なしだが、中で register_user_with_server を�
 
 
 def fetch_and_display_devices_thread():
+    """クライアント側で情報をマージしてデバイスリストを構築・表示 (不整合も考慮)"""
     def task():
         print(f"--- fetch_and_display_devices_thread (My IP: {my_local_ip}, User: {username}) ---")
+        
+        # ステップ1: クライアントから `usbip list -r` を実行してバインド済みデバイスを取得
+        bound_bus_ids = set()
+        try:
+            cmd_remote_list = [USBIP_CMD, 'list', '-r', SERVER_IP]
+            result = subprocess.run(cmd_remote_list, capture_output=True, text=True, check=True)
+            bound_bus_ids = parse_remote_list_output(result.stdout)
+            print(f"Found bound devices from remote list: {bound_bus_ids}")
+        except subprocess.CalledProcessError as e:
+            messagebox.showerror("Connection Error", f"Failed to list remote devices from {SERVER_IP}.\n"
+                                                      f"Ensure server is running and `usbipd` is active.\n\nError: {e.stderr or e.stdout or e}")
+            update_status_bar(f"Error listing remote devices: {e}")
+            return
+        except Exception as e:
+            messagebox.showerror("Error", f"An unexpected error occurred while listing remote devices: {e}")
+            update_status_bar(f"Unexpected error: {e}")
+            return
+
+        # ステップ2: サーバーAPIから物理デバイスリストとアタッチ情報を取得
         try:
             response = requests.get(f"{SERVER_URL}/device_status", timeout=10)
             response.raise_for_status()
             server_data = response.json()
             print(f"Server /device_status response: {json.dumps(server_data, indent=2)}")
-
-            devices_tree.delete(*devices_tree.get_children())
-            
-            # メインは exported_devices_list を使う。statusはサーバーが判断済み。
-            exported_devices = server_data.get("exported_devices_list", [])
-            
-            # current_attachments_managed_by_app も参考にできる (デバッグや補助情報として)
-            # app_managed_attachments = server_data.get("current_attachments_managed_by_app", [])
-
-            for dev in exported_devices:
-                bus_id = dev.get("bus_id", "N/A")
-                description = dev.get("description", "N/A")
-                vid = dev.get("vid", "")
-                pid = dev.get("pid", "")
-                display_desc = f"{description} (VID:{vid} PID:{pid})"
-                status_text = dev.get("status", "Unknown") # サーバーが判断したステータス
-
-                is_used_by_me = False
-                # ステータス文字列から自分が使っているか判定 (より堅牢なのはサーバーからの専用フラグ)
-                if status_text.startswith("In use by:"):
-                    # user_info_if_attached フィールドがあるか確認
-                    user_info = dev.get("user_info_if_attached") # サーバーが付加した使用者の情報文字列
-                    if user_info:
-                        if username in user_info and my_local_ip in user_info:
-                             is_used_by_me = True
-                             status_text = f"Attached by: You ({username})" # 表示を明確に
-                    # もし user_info_if_attached がなければ、status_text そのもので判定試行
-                    elif username in status_text and my_local_ip in status_text : # 簡易判定
-                        is_used_by_me = True
-                        status_text = f"Attached by: You ({username})"
-
-                tag = "used_by_me" if is_used_by_me else "other"
-                devices_tree.insert("", "end", values=(bus_id, display_desc, status_text), tags=(tag,))
-            
-            devices_tree.tag_configure("used_by_me", background="lightgreen")
-
-            if not exported_devices:
-                update_status_bar("No devices found on server or server data issue.")
-            else:
-                update_status_bar("Device list refreshed.")
-        # ... (エラーハンドリングは同じ) ...
         except requests.exceptions.RequestException as e:
-            messagebox.showerror("Server Error", f"Failed to fetch device list from server: {e}")
-            update_status_bar(f"Error fetching server list: {e}")
+            messagebox.showerror("Server API Error", f"Failed to fetch device details from server API: {e}")
+            update_status_bar(f"Error fetching server API: {e}")
+            return
         except Exception as e:
-            messagebox.showerror("Error", f"An unexpected error occurred: {e}")
+            messagebox.showerror("Error", f"An unexpected error occurred while fetching from API: {e}")
             update_status_bar(f"Unexpected error: {e}")
-            import traceback; traceback.print_exc()
+            return
+
+        # ステップ3: 情報をマージしてGUIに表示
+        devices_tree.delete(*devices_tree.get_children())
+        
+        exported_devices = server_data.get("exported_devices_list", [])
+        physical_devices = server_data.get("physical_devices_list", [])
+        app_attachments = server_data.get("app_managed_attachments", {})
+
+        for dev in exported_devices:
+            bus_id = dev.get("bus_id", "N/A")
+            description = dev.get("description", "N/A")
+            vid = dev.get("vid", "")
+            pid = dev.get("pid", "")
+            display_desc = f"{description} (VID:{vid} PID:{pid})"
+
+            # 1. まず、アタッチ状態をアプリのログから判断 (最優先)
+            attach_status_text = "Available"
+            is_used_by_me = False
+            is_used_by_other = False
             
+            if bus_id in app_attachments:
+                attach_info = app_attachments[bus_id]
+                user_info_str = f"{attach_info.get('username', 'Unknown')} ({attach_info.get('client_ip', 'N/A')})"
+                
+                if attach_info.get('client_ip') == my_local_ip:
+                    attach_status_text = f"Attached by: You ({username})"
+                    is_used_by_me = True
+                else:
+                    attach_status_text = f"In use by: {user_info_str}"
+                    is_used_by_other = True
+
+            # 2. 次に、バインド状態を判断
+            is_technically_bound = bus_id in bound_bus_ids # 技術的なバインド状態
+            bind_status_text = "" # 表示用の文字列
+
+            # ★★★ ここからが修正の核 ★★★
+            inconsistency_detected = False
+            
+            if is_used_by_me or is_used_by_other:
+                # 誰かがアタッチしている場合、表示上のBind Statusは "Bound" とする
+                bind_status_text = "Bound"
+                # ただし、技術的にバインドされていない場合は不整合
+                if not is_technically_bound:
+                    inconsistency_detected = True
+                    # Attach Status に警告マークを追加
+                    attach_status_text += " [!]"
+            else:
+                # 誰もアタッチしていない場合は、技術的なバインド状態をそのまま表示
+                bind_status_text = "Bound" if is_technically_bound else "Unbound"
+            
+            # --------------------------------------------------------
+
+            # タグ付けと表示
+            tag_list = []
+            if is_used_by_me:
+                tag_list.append("used_by_me")
+            
+            if is_technically_bound: # タグは技術的な状態で付ける
+                tag_list.append("bound")
+            else:
+                tag_list.append("unbound")
+                
+            if inconsistency_detected:
+                tag_list.append("inconsistent")
+            
+            print(f"attach:{attach_status_text}")
+            devices_tree.insert("", "end", values=(bus_id, display_desc, bind_status_text, attach_status_text), tags=tuple(tag_list))
+        
+        # タグに基づいてスタイルを設定
+        devices_tree.tag_configure("used_by_me", background="lightgreen")
+        devices_tree.tag_configure("unbound", foreground="gray")
+        devices_tree.tag_configure("inconsistent", background="gold") # 不整合状態をハイライト
+        
+        update_status_bar("Device list refreshed.")
+
     threading.Thread(target=task, daemon=True).start()
 
 
@@ -837,13 +858,15 @@ devices_frame.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
 main_frame.rowconfigure(0, weight=1) # フレームを行いっぱいに拡張
 main_frame.columnconfigure(0, weight=1)
 
-devices_tree = ttk.Treeview(devices_frame, columns=("bus_id", "description", "status"), show="headings", height=15)
+devices_tree = ttk.Treeview(devices_frame, columns=("bus_id", "description", "bind_status", "status"), show="headings", height=15)
 devices_tree.heading("bus_id", text="Bus ID (Server)")
 devices_tree.heading("description", text="Description (VID:PID)")
-devices_tree.heading("status", text="Status / User")
+devices_tree.heading("bind_status", text="Bind Status") # ★新しいカラムヘッダー
+devices_tree.heading("status", text="Attach Status / User") # 名前を明確化
 devices_tree.column("bus_id", width=120, anchor="w")
 devices_tree.column("description", width=330, anchor="w")
-devices_tree.column("status", width=250, anchor="w") # ステータス表示幅を少し広げる
+devices_tree.column("bind_status", width=100, anchor="w", stretch=tk.NO) # ★新しいカラムの幅設定
+devices_tree.column("status", width=250, anchor="w")
 devices_tree.pack(side="left", fill="both", expand=True)
 
 devices_scrollbar = ttk.Scrollbar(devices_frame, orient="vertical", command=devices_tree.yview)
