@@ -312,6 +312,52 @@ def set_username(): # 変更なしだが、中で register_user_with_server を�
         if my_local_ip != "Unknown":
             threading.Thread(target=register_user_with_server, daemon=True).start()
 
+def on_device_select(event):
+    """デバイスリストでアイテムが選択されたときに呼ばれ、ボタンの状態を更新する"""
+    selected_item_iid = devices_tree.focus()
+    if not selected_item_iid:
+        # 何も選択されていない場合は、ほぼ全てのボタンを無効化
+        attach_button.config(state="disabled")
+        detach_button.config(state="disabled")
+        bind_button.config(state="disabled")
+        unbind_button.config(state="disabled")
+        return
+
+    item_values = devices_tree.item(selected_item_iid, "values")
+    item_tags = devices_tree.item(selected_item_iid, "tags")
+
+    # カラムから情報を取得 (インデックスは Treeview 定義順)
+    # values = (bus_id, description, bind_status, attach_status)
+    bind_status = item_values[2]
+    attach_status = item_values[3]
+    is_used_by_me = "used_by_me" in item_tags
+
+    # --- 各ボタンの有効/無効ロジック ---
+
+    # 1. Attachボタン
+    # 条件: バインド済み (Bound) かつ、誰もアタッチしていない (Available)
+    if bind_status == "Bound" and "Available" in attach_status:
+        attach_button.config(state="normal")
+    else:
+        attach_button.config(state="disabled")
+
+    # 2. Detachボタン
+    # 条件: 自分がアタッチしている (used_by_me)
+    if is_used_by_me:
+        detach_button.config(state="normal")
+    else:
+        detach_button.config(state="disabled")
+
+    # 3. Bind/Unbindボタン
+    if bind_status == "Bound":
+        bind_button.config(state="disabled")
+        unbind_button.config(state="normal") # バインド済みならアンバインド可能
+    elif bind_status == "Unbound":
+        bind_button.config(state="normal") # アンバインド済みならバインド可能
+        unbind_button.config(state="disabled")
+    else: # 不明な状態
+        bind_button.config(state="disabled")
+        unbind_button.config(state="disabled")
 
 def fetch_and_display_devices_thread():
     """クライアント側で情報をマージしてデバイスリストを構築・表示 (不整合も考慮)"""
@@ -436,7 +482,26 @@ def attach_device():
     item_tags = devices_tree.item(selected_item_iid, "tags")
     is_already_used_by_me = "used_by_me" in item_tags
     if is_already_used_by_me: messagebox.showinfo("Info", f"Device {bus_id} is already attached by you."); return
-    current_status_text = item_values[2]
+    bind_status = item_values[2]
+    current_status_text = item_values[3]
+
+    # 1. バインド状態のチェック (ガード節)
+    if bind_status != "Bound":
+        messagebox.showerror("Attach Error", 
+                             f"Cannot attach device {bus_id}.\n"
+                             f"It is currently '{bind_status}' on the server.\n\n"
+                             "Please bind the device on the server first.")
+        return
+
+    # 2. アタッチ状態のチェック (より明確なエラーメッセージ)
+    if "Available" not in current_status_text:
+        # 自分が使っている場合も、他の人が使っている場合も、Availableではないのでアタッチできない
+        # (他の人から奪う機能は残すが、ボタンが無効なので通常ここには来ない)
+        messagebox.showerror("Attach Error",
+                             f"Cannot attach device {bus_id}.\n"
+                             f"It is not available. Current status: {current_status_text}")
+        return
+    
     if current_status_text.startswith("In use by:") or current_status_text.startswith("Attached by:"):
         if not messagebox.askyesno("Confirm Attach", f"Device {bus_id} seems to be in use: '{current_status_text}'.\nAttempt to attach anyway?"): return
     
@@ -876,6 +941,7 @@ devices_tree.configure(yscrollcommand=devices_scrollbar.set)
 refresh_devices_button = ttk.Button(devices_frame, text="Refresh Device List", command=fetch_and_display_devices_thread)
 refresh_devices_button.pack(pady=5, side="bottom", fill="x")
 
+devices_tree.bind("<<TreeviewSelect>>", on_device_select)
 
 # --- Action Buttons Frame (右側) ---
 action_frame = ttk.Frame(main_frame, padding="10")
